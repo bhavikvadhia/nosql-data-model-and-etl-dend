@@ -1,0 +1,631 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "# Part I. ETL Pipeline for Pre-Processing the Files"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Import Python packages "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "# Import Python packages \n",
+    "import pandas as pd\n",
+    "import cassandra\n",
+    "import re\n",
+    "import os\n",
+    "import glob\n",
+    "import numpy as np\n",
+    "import json\n",
+    "import csv"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Creating list of filepaths to process original event csv data files"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "/home/workspace\n"
+     ]
+    }
+   ],
+   "source": [
+    "# checking your current working directory\n",
+    "print(os.getcwd())\n",
+    "\n",
+    "# Get your current folder and subfolder event data\n",
+    "filepath = os.getcwd() + '/event_data'\n",
+    "\n",
+    "# Create a for loop to create a list of files and collect each filepath\n",
+    "for root, dirs, files in os.walk(filepath):\n",
+    "    \n",
+    "# join the file path and roots with the subdirectories using glob\n",
+    "    file_path_list = glob.glob(os.path.join(root,'*'))\n",
+    "\n",
+    "#print(file_path_list)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Processing the files to create the data file csv that will be used for Apache Casssandra tables"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "# initiating an empty list of rows that will be generated from each file\n",
+    "full_data_rows_list = [] \n",
+    "    \n",
+    "# for every filepath in the file path list \n",
+    "for f in file_path_list:\n",
+    "\n",
+    "# reading csv file \n",
+    "    with open(f, 'r', encoding = 'utf8', newline='') as csvfile: \n",
+    "        # creating a csv reader object \n",
+    "        csvreader = csv.reader(csvfile) \n",
+    "        next(csvreader)\n",
+    "        \n",
+    " # extracting each data row one by one and append it        \n",
+    "        for line in csvreader:\n",
+    "            #print(line)\n",
+    "            full_data_rows_list.append(line) \n",
+    "            \n",
+    "# uncomment the code below if you would like to get total number of rows \n",
+    "#print(len(full_data_rows_list))\n",
+    "# uncomment the code below if you would like to check to see what the list of event data rows will look like\n",
+    "#print(full_data_rows_list)\n",
+    "\n",
+    "# creating a smaller event data csv file called event_datafile_full csv that will be used to insert data into the \\\n",
+    "# Apache Cassandra tables\n",
+    "csv.register_dialect('myDialect', quoting=csv.QUOTE_ALL, skipinitialspace=True)\n",
+    "\n",
+    "with open('event_datafile_new.csv', 'w', encoding = 'utf8', newline='') as f:\n",
+    "    writer = csv.writer(f, dialect='myDialect')\n",
+    "    writer.writerow(['artist','firstName','gender','itemInSession','lastName','length',\\\n",
+    "                'level','location','sessionId','song','userId'])\n",
+    "    for row in full_data_rows_list:\n",
+    "        if (row[0] == ''):\n",
+    "            continue\n",
+    "        writer.writerow((row[0], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[12], row[13], row[16]))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "6821\n"
+     ]
+    }
+   ],
+   "source": [
+    "# check the number of rows in csv file\n",
+    "with open('event_datafile_new.csv', 'r', encoding = 'utf8') as f:\n",
+    "    print(sum(1 for line in f))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "# Part II. Modeling the data into Cassandra tables for analysis\n",
+    "\n",
+    "## CSV file titled <font color=red>event_datafile_new.csv</font> contains the following columns: \n",
+    "- artist \n",
+    "- firstName of user\n",
+    "- gender of user\n",
+    "- item number in session\n",
+    "- last name of user\n",
+    "- length of the song\n",
+    "- level (paid or free song)\n",
+    "- location of the user\n",
+    "- sessionId\n",
+    "- song title\n",
+    "- userId\n",
+    "\n",
+    "The image below is a screenshot of the denormalized data in the <font color=red>**event_datafile_new.csv**</font> file :<br>\n",
+    "\n",
+    "<img src=\"images/image_event_datafile_new.jpg\">"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "### Cassandra set up for loading the csv data"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Creating a Cluster"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "# This should make a connection to a Cassandra instance your local machine \n",
+    "# (127.0.0.1)\n",
+    "\n",
+    "from cassandra.cluster import Cluster\n",
+    "try:\n",
+    "    cluster = Cluster(['127.0.0.1'])\n",
+    "    #To establish connection and begin executing queries, need a session\n",
+    "    session = cluster.connect()\n",
+    "except Exception as e:\n",
+    "    print(e)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Create Keyspace"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "# Creating a Keyspace - udacity\n",
+    "try:\n",
+    "    session.execute(\"\"\"\n",
+    "                    CREATE KEYSPACE IF NOT EXISTS udacity\n",
+    "                      WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor':1}\n",
+    "                    \"\"\")\n",
+    "except Exception as e:\n",
+    "    print(e)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Set Keyspace"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "# Setting KEYSPACE to the keyspace specified above\n",
+    "try:\n",
+    "    session.set_keyspace('udacity')\n",
+    "except Exception as e:\n",
+    "    print(e)\n",
+    "    "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "## Below are queries which will be answered by the dataset. For each Query - data is modeled in a different way and details are provided before each table creation:\n",
+    "\n",
+    "#### 1. Give me the artist, song title and song's length in the music app history that was heard during  sessionId = 338, and itemInSession  = 4\n",
+    "\n",
+    "\n",
+    "#### 2. Give me only the following: name of artist, song (sorted by itemInSession) and user (first and last name) for userid = 10, sessionid = 182\n",
+    "    \n",
+    "\n",
+    "#### 3. Give me every user name (first and last) in my music app history who listened to the song 'All Hands Against His Own'\n",
+    "\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "## Query 1 (selecting details for a given sessionId and itemInSession) </br>\n",
+    "\n",
+    "#### Table creation for query 1\n",
+    "Table name     - SESS_DTL\n",
+    "</br>Primary key    - SESSION_ID, ITEM_IN_SESSION\n",
+    "</br>Partition key  - SESSION_ID\n",
+    "</br>Clustering key - ITEM_IN_SESSION\n",
+    "\n",
+    "Primary key selection criteria:\n",
+    "</br> As we need to get details for each item within a session - data is partitioned by `SESSION_ID` (i.e. PARTITION KEY). Also there are multiple items within a session - so we store them by sorting on `ITEM_IN_SESSION` (i.e. CLUSTERING KEY)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "ct_query = \"CREATE TABLE IF NOT EXISTS SESS_DTL\"\n",
+    "ct_query += \"(session_id int, item_in_session int, artist text, song text, length float, PRIMARY KEY (session_id,item_in_session))\"\n",
+    "\n",
+    "try:\n",
+    "    session.execute(ct_query)\n",
+    "except Exception as e:\n",
+    "    print(e)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Inserting data into SESS_DTL table from the csv file"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "file = 'event_datafile_new.csv'\n",
+    "\n",
+    "with open(file, encoding = 'utf8') as f:\n",
+    "    csvreader = csv.reader(f)\n",
+    "    next(csvreader) # skip header\n",
+    "    for line in csvreader:\n",
+    "        query = \"INSERT INTO sess_dtl (session_id,item_in_session,artist,song,length)\"\n",
+    "        query = query + \"VALUES (%s,%s,%s,%s,%s)\"\n",
+    "        session.execute(query, (int(line[8]),int(line[3]),line[0],line[9],float(line[5])))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Select to check data in SESS_DTL table for SESSION_ID = 338 and ITEM_IN_SESSION = 4"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true,
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "try:\n",
+    "    op_rows = session.execute(\"select artist,song,length from sess_dtl where session_id = 338 and item_in_session = 4\")\n",
+    "\n",
+    "except Exception as e:\n",
+    "    print(e)\n",
+    "    \n",
+    "for row in op_rows:\n",
+    "    print(row.artist,row.song,row.length)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "## Query 2 (Details about the songs for a given user and a session) </br>\n",
+    "\n",
+    "#### Table creation for Query 2\n",
+    "Table name     - USER_SESS_DTL\n",
+    "</br>Primary key    - USER_ID, SESSION_ID, ITEM_IN_SESSION\n",
+    "</br>Partition key  - USER_ID, SESSION_ID\n",
+    "</br>Clustering key - ITEM_IN_SESSION\n",
+    "\n",
+    "Primary key selection criteria:\n",
+    "</br> As we need to get details for a particular session by a user - the data is partitioned by `USER_ID` and `SESSION_ID`(i.e. PARTITION KEY) . Also - there could be multiple records for a given user and session - so we store them by sorting on `ITEM_IN_SESSION` (i.e. CLUSTERING KEY)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "## Query 2: Give me only the following: name of artist, song (sorted by itemInSession) and user (first and last name)\\\n",
+    "## for userid = 10, sessionid = 182\n",
+    "\n",
+    "ct_query = \"CREATE TABLE IF NOT EXISTS USER_SESS_DTL\"\n",
+    "ct_query += \" (user_id int, session_id int, item_in_session int, artist text, song text, user_first_name text, user_last_name text, PRIMARY KEY((user_id,session_id),item_in_session)) with CLUSTERING ORDER BY (item_in_session ASC)\"\n",
+    "\n",
+    "try:\n",
+    "    session.execute(ct_query)\n",
+    "except Exception as e:\n",
+    "    print(e)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Inserting data into USER_SESS_DTL from csv file"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "file = 'event_datafile_new.csv'\n",
+    "\n",
+    "with open(file,encoding = 'utf8') as f:\n",
+    "    csvreader = csv.reader(f)\n",
+    "    next(csvreader)\n",
+    "\n",
+    "    for line in csvreader:\n",
+    "        query = \"INSERT INTO USER_SESS_DTL(user_id, session_id, item_in_session,artist,song,user_first_name,user_last_name)\"\n",
+    "        query += \"VALUES(%s,%s,%s,%s,%s,%s,%s)\"\n",
+    "        session.execute(query,(int(line[10]),int(line[8]),int(line[3]),line[0],line[9],line[1],line[4]))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Select to check data in USER_SESS_DTL for USER_ID = 10 and SESSION_ID = 182"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "try:\n",
+    "    rows = session.execute(\"select artist,song,user_first_name,user_last_name from user_sess_dtl where user_id = 10 and session_id = 182\")\n",
+    "\n",
+    "except Exception as e:\n",
+    "    print(e)\n",
+    "\n",
+    "for row in rows:\n",
+    "    print(row.artist,row.song,row.user_first_name,row.user_last_name)\n",
+    "    #print(row)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "## Query 3 (Details about the users who have listened to a particular song) </br>\n",
+    "\n",
+    "#### Table creation for query 3\n",
+    "Table name     - SONG_PLAY_DTL\n",
+    "</br>Primary key    - SONG,USER_ID\n",
+    "</br>Partition key  - SONG\n",
+    "</br>Clustering key - USER_ID\n",
+    "\n",
+    "Primary key selection criteria:\n",
+    "</br> As we need to get details for all the users who have listened to a particular song - the data is partitioned by `SONG`(i.e. PARTITION KEY) . Also - there could be multiple users who have listened to a song - so we store them by sorting on `USER_ID` (i.e. CLUSTERING KEY)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "## Query 3: Give me every user name (first and last) in my music app history who listened to the song 'All Hands Against His Own'\n",
+    "\n",
+    "ct_query = \"CREATE TABLE IF NOT EXISTS SONG_PLAY_DTL \"\n",
+    "ct_query += \"(song text,user_id int,user_first_name text, user_last_name text, PRIMARY KEY(song,user_id))\"\n",
+    "\n",
+    "try:\n",
+    "    session.execute(ct_query)\n",
+    "\n",
+    "except Exception as e:\n",
+    "    print(e)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Inserting data into SONG_PLAY_DTL table from csv file"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "file = 'event_datafile_new.csv'\n",
+    "with open(file,encoding = 'utf8') as f:\n",
+    "    csvreader = csv.reader(f)\n",
+    "    next(csvreader)\n",
+    "    \n",
+    "    for line in csvreader:\n",
+    "        \n",
+    "        query = \"INSERT INTO SONG_PLAY_DTL(song,user_id,user_first_name,user_last_name)\"\n",
+    "        query += \" VALUES(%s,%s,%s,%s)\"\n",
+    "        session.execute(query,(line[9],int(line[10]),line[1],line[4]))                  "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "#### Select to check data in SONG_PLAY_DTL table for song = 'All Hands Against His Own'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "try:\n",
+    "    rows = session.execute(\"select user_first_name,user_last_name from song_play_dtl where song='All Hands Against His Own'\")\n",
+    "\n",
+    "except Exception as e:\n",
+    "    print(e)\n",
+    "\n",
+    "for row in rows:\n",
+    "    print(row.user_first_name,row.user_last_name)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "editable": true
+   },
+   "source": [
+    "### Data drop and Closing of session and cluster connection"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "# Drop the tables\n",
+    "try:\n",
+    "    session.execute(\"drop table sess_dtl\")\n",
+    "    session.execute(\"drop table user_sess_dtl\")\n",
+    "    session.execute(\"drop table song_play_dtl\")\n",
+    "    \n",
+    "except Exception as e:\n",
+    "    print(e)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "editable": true
+   },
+   "outputs": [],
+   "source": [
+    "# Closing the session and cluster connection\n",
+    "session.shutdown()\n",
+    "cluster.shutdown()"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.6.3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
